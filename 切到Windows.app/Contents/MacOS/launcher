@@ -1,0 +1,4 @@
+#!/bin/zsh
+ROOT="$(cd "$(dirname "$0")/../../.." && pwd)"
+cd "$ROOT" || exit 1
+exec ./scripts/switch-to-windows-now.sh
