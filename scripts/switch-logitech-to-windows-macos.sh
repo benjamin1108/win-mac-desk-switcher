@@ -12,6 +12,7 @@ KEYBOARD_PRODUCT="${KEYBOARD_PRODUCT:-Alto Keys K98M}"
 MOUSE_PRODUCT="${MOUSE_PRODUCT:-MX Master 3S}"
 KEYBOARD_FEATURE_INDEX="${KEYBOARD_FEATURE_INDEX:-0x0A}"
 MOUSE_FEATURE_INDEX="${MOUSE_FEATURE_INDEX:-0x0A}"
+INTER_DEVICE_DELAY="${INTER_DEVICE_DELAY:-3}"
 
 usage() {
   cat <<'EOF'
@@ -19,13 +20,17 @@ Usage: scripts/switch-logitech-to-windows-macos.sh [options]
 
 Options:
   --target-channel N       Physical Easy-Switch channel. Default: 1.
+  --inter-delay SECONDS    Seconds to wait between keyboard and mouse switch
+                           so a sleeping Windows host has time to wake via BT
+                           HID before the mouse probes the new channel.
+                           Default: 3. Set 0 to disable.
   --dry-run                Print commands without sending HID reports.
   --list                   List HID devices using bin/hid-send.
   -h, --help               Show this help.
 
 Environment overrides:
   KEYBOARD_VIDPID, MOUSE_VIDPID, KEYBOARD_PRODUCT, MOUSE_PRODUCT,
-  KEYBOARD_FEATURE_INDEX, MOUSE_FEATURE_INDEX, HID_SEND
+  KEYBOARD_FEATURE_INDEX, MOUSE_FEATURE_INDEX, INTER_DEVICE_DELAY, HID_SEND
 EOF
 }
 
@@ -79,6 +84,10 @@ while [[ $# -gt 0 ]]; do
       TARGET_CHANNEL="$2"
       shift 2
       ;;
+    --inter-delay)
+      INTER_DEVICE_DELAY="$2"
+      shift 2
+      ;;
     --dry-run)
       DRY_RUN="1"
       shift
@@ -115,6 +124,12 @@ mouse_payload="$(make_payload "$MOUSE_FEATURE_INDEX" "$host_index")"
 
 result_status=0
 send_device "keyboard" "$KEYBOARD_VIDPID" "$KEYBOARD_PRODUCT" "$keyboard_payload" || result_status=1
+
+if [[ "$DRY_RUN" != "1" && "$INTER_DEVICE_DELAY" != "0" ]]; then
+  log "Waiting ${INTER_DEVICE_DELAY}s for target host to wake before switching mouse"
+  sleep "$INTER_DEVICE_DELAY"
+fi
+
 send_device "mouse" "$MOUSE_VIDPID" "$MOUSE_PRODUCT" "$mouse_payload" || result_status=1
 
 exit "$result_status"
