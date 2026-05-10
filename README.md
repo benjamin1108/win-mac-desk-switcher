@@ -56,17 +56,17 @@ logs\switch-to-mac-now.log
 
 ## Mac 上一键切到 Windows
 
-Windows 连接在显示器的 DP1 口。BetterDisplay GUI 里可用的输入项是 `DisplayPort 1 (LG alt)`，所以 Mac 端脚本默认使用 LG alternate DDC 命令切到 DP1：`ddcAlt=0xD0`，`vcp=inputSelectAlt`。脚本会先把 Logitech 键盘和鼠标切到 Easy-Switch 1 号信道，再切显示器。使用 BetterDisplay 后端时，需要 BetterDisplay 正在运行，并且显示器已开启 DDC/CI：
+Windows 连接在显示器的 DP1 口。Mac 端脚本默认使用 `m1ddc` 的 LG alternate DDC 命令切到 DP1：`input-alt 208`，也就是 `0xD0`。脚本会先把 Logitech 键盘和鼠标切到 Easy-Switch 1 号信道，再切显示器。显示器需要开启 DDC/CI：
 
 ```text
 一键切到Windows.command
 ```
 
-第一次使用前需要安装 `hidapi`。如果没有安装 BetterDisplay，还需要安装 `ddcctl`：
+第一次使用前需要安装 `hidapi` 和 `m1ddc`：
 
 ```zsh
 brew install hidapi
-brew install ddcctl
+brew install m1ddc
 ```
 
 macOS 打开键盘 HID 设备时可能需要 Input Monitoring 权限。双击 `.command` 会由 Terminal 运行，所以需要到：
@@ -92,11 +92,18 @@ System Settings → Privacy & Security → Input Monitoring
 也可以指定后端：
 
 ```zsh
+./scripts/switch-to-windows-now.sh --backend m1ddc --method lg-alt --lg-alt-input 0xD0
 ./scripts/switch-to-windows-now.sh --backend betterdisplay --method lg-alt --lg-alt-input 0xD0
 ./scripts/switch-to-windows-now.sh --backend ddcctl --display 1 --input 15
 ```
 
-BetterDisplay 的命令等价于：
+`m1ddc` 的命令等价于：
+
+```zsh
+m1ddc display 1 set input-alt 208
+```
+
+BetterDisplay 的旧命令等价于：
 
 ```zsh
 /Applications/BetterDisplay.app/Contents/MacOS/BetterDisplay set --ddcAlt=0xD0 --vcp=inputSelectAlt
@@ -108,12 +115,28 @@ BetterDisplay 的命令等价于：
 logs/switch-to-windows-now.log
 ```
 
+### 打包成独立 Mac App
+
+生成自包含 bundle：
+
+```zsh
+./scripts/build-macos-app.sh
+```
+
+输出位置：
+
+```text
+dist/切到Windows.app
+```
+
+bundle 会包含 app 专用的 IOKit 版 `hid-send`、`m1ddc` 和 Mac 侧切换脚本，不再依赖 Homebrew 的 `libhidapi` 动态库。打包脚本会对 app 做 ad-hoc 签名，方便 macOS 隐私设置识别它。第一次双击时如果系统没有弹出授权提示，可以到 `System Settings → Privacy & Security → Input Monitoring` 手动加入 `/Applications/切到Windows.app`。
+
 ### Logitech 键鼠反向切换
 
 Mac 端通过 `hidapi` 发送 Bluetooth HID++ report。当前设备配置：
 
 ```text
-键盘：Alto Keys K98M，VID/PID 046D:B38E，feature index 0x09
+键盘：Alto Keys K98M，VID/PID 046D:B38E，feature index 0x0A
 鼠标：MX Master 3S，VID/PID 046D:B034，feature index 0x0A
 目标：物理 1 号信道，即 Windows
 ```

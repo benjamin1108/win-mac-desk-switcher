@@ -22,10 +22,10 @@ usage() {
 Usage: scripts/switch-to-windows-now.sh [options]
 
 Options:
-  --display N          ddcctl display index. Default: 1
+  --display N          Display index for m1ddc/ddcctl. Default: 1
   --input N            Standard DDC input source value. Default: 15 (0x0f, DP1)
   --lg-alt-input N     LG alternate input source value. Default: 0xD0 (DP1)
-  --backend NAME       auto, betterdisplay, or ddcctl. Default: auto
+  --backend NAME       auto, m1ddc, betterdisplay, or ddcctl. Default: auto
   --method NAME        lg-alt or standard. Default: lg-alt
   --ddc-command CMD    Custom display switch command.
   --logi-command CMD   Optional Logitech switch command.
@@ -44,6 +44,7 @@ Examples:
   scripts/switch-to-windows-now.sh
   scripts/switch-to-windows-now.sh --method standard --input 15
   scripts/switch-to-windows-now.sh --method lg-alt --lg-alt-input 0xD0
+  scripts/switch-to-windows-now.sh --backend m1ddc --method lg-alt --lg-alt-input 0xD0
   LOGI_COMMAND='hidapitester ...' scripts/switch-to-windows-now.sh
   DDC_COMMAND='/opt/homebrew/bin/ddcctl -d 1 -i 15' scripts/switch-to-windows-now.sh
 EOF
@@ -75,8 +76,15 @@ run_shell_command() {
   fi
 
   log "ACTION" "$label: $command"
-  /bin/zsh -lc "$command"
+  local output_file
+  output_file="$(mktemp "${TMPDIR:-/tmp}/win-mac-desk-switcher.XXXXXX")"
+  /bin/zsh -lc "$command" >"$output_file" 2>&1
   local exit_code=$?
+  local output_line
+  while IFS= read -r output_line; do
+    log "OUTPUT" "$label: $output_line"
+  done < "$output_file"
+  rm -f "$output_file"
   log "ACTION" "$label exit code: $exit_code"
   return "$exit_code"
 }
@@ -87,10 +95,37 @@ switch_display() {
     return $?
   fi
 
-  if [[ "$DDC_BACKEND" == "auto" && -x "$BETTERDISPLAY_PATH" ]]; then
+  if [[ "$DDC_BACKEND" == "auto" && "$(command -v m1ddc)" != "" ]]; then
+    DDC_BACKEND="m1ddc"
+  elif [[ "$DDC_BACKEND" == "auto" && -x "$BETTERDISPLAY_PATH" ]]; then
     DDC_BACKEND="betterdisplay"
   elif [[ "$DDC_BACKEND" == "auto" ]]; then
     DDC_BACKEND="ddcctl"
+  fi
+
+  if [[ "$DDC_BACKEND" == "m1ddc" ]]; then
+    if [[ "$DRY_RUN" != "1" ]] && ! command -v m1ddc >/dev/null 2>&1; then
+      log "ERROR" "m1ddc not found. Install it with: brew install m1ddc"
+      log "ERROR" "Or pass a custom command with --ddc-command or DDC_COMMAND."
+      return 127
+    fi
+
+    local m1ddc_path="m1ddc"
+    if [[ "$DRY_RUN" != "1" ]]; then
+      m1ddc_path="$(command -v m1ddc)"
+    fi
+
+    if [[ "$DDC_METHOD" == "lg-alt" ]]; then
+      local lg_alt_input_decimal=$(( LG_ALT_INPUT_SOURCE ))
+      run_shell_command "display switch" "$m1ddc_path display $DISPLAY_INDEX set input-alt $lg_alt_input_decimal"
+    elif [[ "$DDC_METHOD" == "standard" ]]; then
+      local input_decimal=$(( INPUT_SOURCE ))
+      run_shell_command "display switch" "$m1ddc_path display $DISPLAY_INDEX set input $input_decimal"
+    else
+      log "ERROR" "Unknown DDC method: $DDC_METHOD"
+      return 2
+    fi
+    return $?
   fi
 
   if [[ "$DDC_BACKEND" == "betterdisplay" ]]; then
