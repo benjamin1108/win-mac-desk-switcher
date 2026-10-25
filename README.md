@@ -20,7 +20,9 @@ Mac 端接力适配请先阅读 [设备信息与操作步骤](docs/mac-handoff-2
 
 显示器识别为 LG ULTRAGEAR+，保留原有 Type-C 切换参数。自动监控启动后先等待全部配置设备同时在线，避免设备休眠或编号错误导致启动时误切屏。未启用登录自启动，也未执行真实切屏。
 
-本次验证范围是当前 Windows 电脑。下文 Mac 端配置仍是原项目的配置（包括旧鼠标蓝牙参数），需要在 Mac 上读取新鼠标的连接信息后再适配，不能直接套用 Windows 接收器的 slot 编号。
+Mac 端也已完成只读实测和适配：通过 Bolt `046D:C548` 连接，HID++ 接口为 UsagePage `0xFF00` / Usage `0x0001`；键盘 Alto Keys K98M 在 **slot 2**，MX Master 4 在 **slot 3**，当前均为物理 2 号信道。键盘 CHANGE_HOST / HOSTS_INFO 为 `0x0A` / `0x0B`，鼠标为 `0x0E` / `0x0F`，每次运行动态查询。Mac 和 Windows 的配对表不同，不可互相覆盖。
+
+Mac 默认只使用已验证的 Bolt 配置，先读取两台设备名称并校验，再切到物理 1 号信道。设备不符、查询失败或明确的 HID 写入/协议错误会停止后续切换；默认顺序下不继续切屏。CHANGE_HOST 成功写入后可能因设备离开 Mac 而收不到回复，此时会注明实际切换待确认。已完成演练、协议/脚本回归测试和 App 构建；真实键盘、鼠标、显示器切换仍待用户准备好后验收。
 
 ## 目录结构
 
@@ -72,11 +74,11 @@ Windows 连接在显示器的 DP1 口。Mac 端脚本默认使用 `m1ddc` 的 LG
 一键切到Windows.command
 ```
 
-第一次使用前需要安装 `hidapi` 和 `m1ddc`：
+使用源码时需要 Apple Command Line Tools 和 `m1ddc`（原生 IOKit 工具无需 `hidapi`）；打包好的 App 已包含所需工具：
 
 ```zsh
-brew install hidapi
 brew install m1ddc
+cc tools/hid-send-macos.c -framework IOKit -framework CoreFoundation -o bin/hid-send-macos
 ```
 
 macOS 打开键盘 HID 设备时可能需要 Input Monitoring 权限。双击 `.command` 会由 Terminal 运行，所以需要到：
@@ -143,14 +145,15 @@ bundle 会包含 app 专用的 IOKit 版 `hid-send`、`m1ddc` 和 Mac 侧切换�
 
 ### Logitech 键鼠反向切换
 
-Mac 端优先通过 Logitech Bolt 接收器 `046D:C548` 发送 receiver HID++ `CHANGE_HOST`。如果没有找到 receiver 或 receiver 模式失败，会回退到旧的蓝牙直连 HID++ report。当前默认配置：
+Mac 端默认通过 Logitech Bolt 接收器 `046D:C548` 发送 receiver HID++ `CHANGE_HOST`。先检查键盘和鼠标名称，再动态查询切换功能；不再自动使用旧鼠标蓝牙参数。当前默认配置：
 
 ```text
 Bolt receiver：VID/PID 046D:C548
-键盘：macOS receiver device 1
-鼠标：macOS receiver device 2
+HID++ 接口：UsagePage 0xFF00 / Usage 0x0001
+键盘：macOS receiver device 2，Alto Keys K98M
+鼠标：macOS receiver device 3，MX Master 4
 蓝牙回退键盘：Alto Keys K98M，VID/PID 046D:B38E，feature index 0x0A
-蓝牙回退鼠标：MX Master 3S，VID/PID 046D:B034，feature index 0x0A
+蓝牙鼠标：MX Master 4 的 VID/PID 和 feature index 未在蓝牙上验证，默认不配置
 目标：物理 1 号信道，即 Windows
 ```
 
@@ -160,17 +163,19 @@ Bolt receiver：VID/PID 046D:C548
 ./scripts/switch-logitech-to-windows-macos.sh
 ```
 
-强制指定模式：
+只读检查已配置的两台设备，或扫描接收器配对槽位：
 
 ```zsh
-./scripts/switch-logitech-to-windows-macos.sh --transport receiver
-./scripts/switch-logitech-to-windows-macos.sh --transport bluetooth
+./scripts/switch-logitech-to-windows-macos.sh --check
+./scripts/switch-logitech-to-windows-macos.sh --probe-receiver
 ```
+
+`--transport receiver` 是默认模式。保留的 `bluetooth` 和 `auto` 模式必须先明确设置并验证 `MOUSE_VIDPID`、`MOUSE_FEATURE_INDEX`，否则拒绝蓝牙发送；`auto` 只允许在接收器预检失败、尚未切走任何设备时尝试已配置的蓝牙模式。当前 Mac 没有连接蓝牙直连 MX Master 4，因此该路径未实测。
 
 查看 macOS HID 设备：
 
 ```zsh
-./bin/hid-send --list
+./bin/hid-send-macos --list
 ```
 
 如果 Windows 不是 1 号信道，可以改目标信道：
@@ -266,3 +271,14 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\logi-hidpp-pro
 ```powershell
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\switch-to-mac-now.ps1 -TargetChannel 3
 ```
+
+## Mac 回归验证（不操作真实硬件）
+
+```zsh
+python3 tests/test_macos_switch.py
+cc tests/hid-send-macos-tests.c -Wall -Wextra -Werror \
+  -framework IOKit -framework CoreFoundation -o /tmp/hid-send-macos-tests
+/tmp/hid-send-macos-tests
+```
+
+脚本测试替换 HID/DDC 工具，覆盖演练无发送、名称预检失败、键鼠切换失败时停止切屏、空格路径和旧蓝牙配置禁用。原生协议测试使用模拟 IOKit，覆盖功能索引 0、设备名不符、写入失败、HID++ 1/2 错误和切换后的无回复。

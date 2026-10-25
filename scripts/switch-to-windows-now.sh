@@ -117,10 +117,10 @@ switch_display() {
 
     if [[ "$DDC_METHOD" == "lg-alt" ]]; then
       local lg_alt_input_decimal=$(( LG_ALT_INPUT_SOURCE ))
-      run_shell_command "display switch" "$m1ddc_path display $DISPLAY_INDEX set input-alt $lg_alt_input_decimal"
+      run_shell_command "display switch" "${(q)m1ddc_path} display $DISPLAY_INDEX set input-alt $lg_alt_input_decimal"
     elif [[ "$DDC_METHOD" == "standard" ]]; then
       local input_decimal=$(( INPUT_SOURCE ))
-      run_shell_command "display switch" "$m1ddc_path display $DISPLAY_INDEX set input $input_decimal"
+      run_shell_command "display switch" "${(q)m1ddc_path} display $DISPLAY_INDEX set input $input_decimal"
     else
       log "ERROR" "Unknown DDC method: $DDC_METHOD"
       return 2
@@ -158,7 +158,7 @@ switch_display() {
 
   local ddcctl_path
   ddcctl_path="$(command -v ddcctl)"
-  run_shell_command "display switch" "$ddcctl_path -d $DISPLAY_INDEX -i $INPUT_SOURCE"
+  run_shell_command "display switch" "${(q)ddcctl_path} -d $DISPLAY_INDEX -i $INPUT_SOURCE"
 }
 
 switch_logitech() {
@@ -168,13 +168,18 @@ switch_logitech() {
   fi
 
   if [[ -z "$LOGI_COMMAND" ]]; then
-    local default_logi="$ROOT_DIR/scripts/switch-logitech-to-windows-macos.sh --target-channel $LOGI_TARGET_CHANNEL"
+    local logi_script="$ROOT_DIR/scripts/switch-logitech-to-windows-macos.sh"
+    if [[ "$DRY_RUN" == "1" ]]; then
+      /bin/zsh "$logi_script" --target-channel "$LOGI_TARGET_CHANNEL" --dry-run
+      return $?
+    fi
+    local default_logi="/bin/zsh ${(q)logi_script} --target-channel ${(q)LOGI_TARGET_CHANNEL}"
     run_shell_command "Logitech switch" "$default_logi"
     local exit_code=$?
     if [[ "$exit_code" -ne 0 ]]; then
-      log "WARN" "Logitech switch reported errors; continuing to display switch."
+      log "ERROR" "Logitech switch failed."
     fi
-    return 0
+    return "$exit_code"
   fi
 
   run_shell_command "Logitech switch" "$LOGI_COMMAND"
@@ -252,6 +257,10 @@ if [[ "$DISPLAY_FIRST" == "1" ]]; then
 else
   switch_logitech
   logi_ok=$?
+  if [[ "$logi_ok" -ne 0 ]]; then
+    log "ERROR" "Display left unchanged because Logitech switch failed."
+    exit 1
+  fi
   switch_display
   display_ok=$?
 fi

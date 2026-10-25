@@ -13,19 +13,20 @@ fi
 TARGET_CHANNEL="${TARGET_CHANNEL:-1}"
 DRY_RUN="${DRY_RUN:-0}"
 PROBE_RECEIVER="${PROBE_RECEIVER:-0}"
-LOGI_TRANSPORT="${LOGI_TRANSPORT:-auto}"
+CHECK_ONLY=0
+LOGI_TRANSPORT="${LOGI_TRANSPORT:-receiver}"
 RECEIVER_VIDPID="${RECEIVER_VIDPID:-046D:C548}"
 RECEIVER_PRODUCT="${RECEIVER_PRODUCT:-USB Receiver}"
 RECEIVER_USAGE="${RECEIVER_USAGE:-0x0001}"
-KEYBOARD_SLOT="${KEYBOARD_SLOT:-1}"
-MOUSE_SLOT="${MOUSE_SLOT:-2}"
+KEYBOARD_SLOT="${KEYBOARD_SLOT:-2}"
+MOUSE_SLOT="${MOUSE_SLOT:-3}"
 HIDPP_TIMEOUT_MS="${HIDPP_TIMEOUT_MS:-1500}"
 KEYBOARD_VIDPID="${KEYBOARD_VIDPID:-046D:B38E}"
-MOUSE_VIDPID="${MOUSE_VIDPID:-046D:B034}"
+MOUSE_VIDPID="${MOUSE_VIDPID:-}"
 KEYBOARD_PRODUCT="${KEYBOARD_PRODUCT:-Alto Keys K98M}"
-MOUSE_PRODUCT="${MOUSE_PRODUCT:-MX Master 3S}"
+MOUSE_PRODUCT="${MOUSE_PRODUCT:-MX Master 4}"
 KEYBOARD_FEATURE_INDEX="${KEYBOARD_FEATURE_INDEX:-0x0A}"
-MOUSE_FEATURE_INDEX="${MOUSE_FEATURE_INDEX:-0x0A}"
+MOUSE_FEATURE_INDEX="${MOUSE_FEATURE_INDEX:-}"
 CHANGE_HOST_FUNCTION="${CHANGE_HOST_FUNCTION:-0x12}"
 INTER_DEVICE_DELAY="${INTER_DEVICE_DELAY:-3}"
 
@@ -35,11 +36,12 @@ Usage: scripts/switch-logitech-to-windows-macos.sh [options]
 
 Options:
   --target-channel N       Physical Easy-Switch channel. Default: 1.
-  --transport MODE         auto, receiver, or bluetooth. Default: auto.
-  --keyboard-slot N        Logitech receiver HID++ slot for keyboard. Default: 3.
-  --mouse-slot N           Logitech receiver HID++ slot for mouse. Default: 4.
+  --transport MODE         auto, receiver, or bluetooth. Default: receiver.
+  --keyboard-slot N        Logitech receiver HID++ slot for keyboard. Default: 2.
+  --mouse-slot N           Logitech receiver HID++ slot for mouse. Default: 3.
   --hidpp-timeout-ms N     Receiver HID++ reply timeout. Default: 1500.
-  --probe-receiver         Probe receiver usage/device combinations without switching.
+  --probe-receiver         Read online receiver devices, names and host information.
+  --check                  Verify both configured devices without switching.
   --inter-delay SECONDS    Seconds to wait between keyboard and mouse switch
                            so a sleeping Windows host has time to wake via BT
                            HID before the mouse probes the new channel.
@@ -54,6 +56,9 @@ Environment overrides:
   KEYBOARD_PRODUCT, MOUSE_PRODUCT,
   KEYBOARD_FEATURE_INDEX, MOUSE_FEATURE_INDEX, CHANGE_HOST_FUNCTION,
   INTER_DEVICE_DELAY, HID_SEND
+
+Bluetooth requires explicitly verified MOUSE_VIDPID and MOUSE_FEATURE_INDEX.
+The previous MX Master 3S Bluetooth defaults are no longer used.
 EOF
 }
 
@@ -115,6 +120,7 @@ send_receiver_slot() {
   local label="$1"
   local slot="$2"
   local target_host_index="$3"
+  local expected_name="$4"
 
   local command=(
     "$HID_SEND"
@@ -124,6 +130,7 @@ send_receiver_slot() {
     --usage "$RECEIVER_USAGE"
     --product "$RECEIVER_PRODUCT"
     --device "$slot"
+    --expect-name "$expected_name"
     --target-host-index "$target_host_index"
     --timeout-ms "$HIDPP_TIMEOUT_MS"
   )
@@ -145,14 +152,24 @@ probe_receiver() {
   for usage in 0x0001 0x0002; do
     for device in 1 2 3 4 5 6; do
       log "Probing receiver usage=$usage device=$device"
-      "$HID_SEND" \
+      if [[ "$DRY_RUN" == "1" ]]; then
+        log "dry run: probe receiver usage=$usage slot=$device (ping/info only)"
+        probe_status=0
+        continue
+      fi
+      if "$HID_SEND" \
         --receiver-ping \
         --vidpid "$RECEIVER_VIDPID" \
         --usage-page 0xff00 \
         --usage "$usage" \
         --product "$RECEIVER_PRODUCT" \
         --device "$device" \
-        --timeout-ms "$HIDPP_TIMEOUT_MS" && probe_status=0
+        --timeout-ms "$HIDPP_TIMEOUT_MS"; then
+        probe_status=0
+        "$HID_SEND" --receiver-info --vidpid "$RECEIVER_VIDPID" \
+          --usage-page 0xff00 --usage "$usage" --product "$RECEIVER_PRODUCT" \
+          --device "$device" --timeout-ms "$HIDPP_TIMEOUT_MS" || probe_status=1
+      fi
     done
   done
 
@@ -160,7 +177,7 @@ probe_receiver() {
 }
 
 hid_send_supports_receiver() {
-  [[ -x "$HID_SEND" ]] && "$HID_SEND" --help 2>&1 | grep -q -- '--receiver-change-host'
+  [[ -x "$HID_SEND" ]] && "$HID_SEND" --help 2>&1 | grep -q -- '--expect-name'
 }
 
 build_hid_send() {
@@ -179,7 +196,51 @@ build_hid_send() {
   fi
 }
 
+check_receiver_device() {
+  local slot="$1"
+  local expected_name="$2"
+  local command=("$HID_SEND" --receiver-info --vidpid "$RECEIVER_VIDPID"
+    --usage-page 0xff00 --usage "$RECEIVER_USAGE" --product "$RECEIVER_PRODUCT"
+    --device "$slot" --expect-name "$expected_name" --timeout-ms "$HIDPP_TIMEOUT_MS")
+  if [[ "$DRY_RUN" == "1" ]]; then
+    log "dry run: ${(q)command[@]}"
+    return 0
+  fi
+  "${command[@]}"
+}
+
+check_receiver() {
+  check_receiver_device "$KEYBOARD_SLOT" "$KEYBOARD_PRODUCT" &&
+    check_receiver_device "$MOUSE_SLOT" "$MOUSE_PRODUCT"
+}
+
+check_bluetooth_config() {
+  if [[ -z "$MOUSE_VIDPID" || -z "$MOUSE_FEATURE_INDEX" ]]; then
+    log "Bluetooth is not configured for MX Master 4. Verify MOUSE_VIDPID and MOUSE_FEATURE_INDEX first." >&2
+    return 1
+  fi
+  if [[ "$CHECK_ONLY" == "1" ]]; then
+    log "--check currently supports the verified Bolt receiver configuration only." >&2
+    return 1
+  fi
+}
+
+wait_for_host() {
+  if [[ "$DRY_RUN" != "1" && "$INTER_DEVICE_DELAY" != "0" ]]; then
+    log "Waiting ${INTER_DEVICE_DELAY}s for target host to wake before switching mouse"
+    sleep "$INTER_DEVICE_DELAY"
+  fi
+}
+
 while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --target-channel|--transport|--keyboard-slot|--mouse-slot|--hidpp-timeout-ms|--inter-delay)
+      if [[ $# -lt 2 || "$2" == --* ]]; then
+        log "Missing value for $1" >&2
+        exit 2
+      fi
+      ;;
+  esac
   case "$1" in
     --target-channel)
       TARGET_CHANNEL="$2"
@@ -201,6 +262,10 @@ while [[ $# -gt 0 ]]; do
       HIDPP_TIMEOUT_MS="$2"
       shift 2
       ;;
+    --check)
+      CHECK_ONLY=1
+      shift
+      ;;
     --probe-receiver)
       PROBE_RECEIVER="1"
       shift
@@ -214,6 +279,7 @@ while [[ $# -gt 0 ]]; do
       shift
       ;;
     --list)
+      [[ -x "$HID_SEND" ]] || build_hid_send
       "$HID_SEND" --list
       exit $?
       ;;
@@ -229,13 +295,28 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
+case "$LOGI_TRANSPORT" in
+  auto|receiver|bluetooth) ;;
+  *) log "Transport must be auto, receiver, or bluetooth." >&2; exit 2 ;;
+esac
+case "$TARGET_CHANNEL" in
+  1|2|3) ;;
+  *) log "Target channel must be 1, 2, or 3." >&2; exit 2 ;;
+esac
+if [[ "$KEYBOARD_SLOT" != [1-6] || "$MOUSE_SLOT" != [1-6] || "$KEYBOARD_SLOT" == "$MOUSE_SLOT" ]]; then
+  log "Keyboard and mouse slots must be distinct numbers from 1 to 6." >&2
+  exit 2
+fi
+if [[ "$HIDPP_TIMEOUT_MS" != <1-60000> || ! "$INTER_DEVICE_DELAY" =~ '^[0-9]+([.][0-9]+)?$' ]]; then
+  log "Invalid timeout or inter-device delay." >&2
+  exit 2
+fi
+
 if [[ ! -x "$HID_SEND" ]]; then
   build_hid_send
-elif [[ "$LOGI_TRANSPORT" == "auto" || "$LOGI_TRANSPORT" == "receiver" ]]; then
-  if ! hid_send_supports_receiver; then
-    log "$HID_SEND does not support receiver CHANGE_HOST; rebuilding"
-    build_hid_send
-  fi
+elif [[ "$LOGI_TRANSPORT" != "bluetooth" ]] && ! hid_send_supports_receiver; then
+  log "$HID_SEND lacks receiver identity checks; rebuilding"
+  build_hid_send
 fi
 
 if [[ "$PROBE_RECEIVER" == "1" ]]; then
@@ -243,46 +324,25 @@ if [[ "$PROBE_RECEIVER" == "1" ]]; then
   exit $?
 fi
 
-case "$LOGI_TRANSPORT" in
-  auto|receiver|bluetooth) ;;
-  *)
-    log "Transport must be auto, receiver, or bluetooth." >&2
-    exit 2
-    ;;
-esac
-
 host_index_decimal="$(channel_to_host_index_decimal "$TARGET_CHANNEL")" || exit 2
 host_index="$(channel_to_host_index_hex "$TARGET_CHANNEL")" || exit 2
+
+if [[ "$LOGI_TRANSPORT" != "bluetooth" ]]; then
+  if check_receiver; then
+    [[ "$CHECK_ONLY" == "1" ]] && exit 0
+    send_receiver_slot "keyboard" "$KEYBOARD_SLOT" "$host_index_decimal" "$KEYBOARD_PRODUCT" || exit 1
+    wait_for_host
+    send_receiver_slot "mouse" "$MOUSE_SLOT" "$host_index_decimal" "$MOUSE_PRODUCT"
+    exit $?
+  fi
+  [[ "$LOGI_TRANSPORT" == "receiver" || "$CHECK_ONLY" == "1" ]] && exit 1
+  log "Receiver preflight failed; checking explicitly configured Bluetooth devices"
+fi
+
+check_bluetooth_config || exit 1
 keyboard_payload="$(make_payload "$KEYBOARD_FEATURE_INDEX" "$host_index")"
 mouse_payload="$(make_payload "$MOUSE_FEATURE_INDEX" "$host_index")"
-
-result_status=0
-
-if [[ "$LOGI_TRANSPORT" == "auto" || "$LOGI_TRANSPORT" == "receiver" ]]; then
-  receiver_status=0
-  send_receiver_slot "keyboard" "$KEYBOARD_SLOT" "$host_index_decimal" || receiver_status=1
-
-  if [[ "$DRY_RUN" != "1" && "$INTER_DEVICE_DELAY" != "0" ]]; then
-    log "Waiting ${INTER_DEVICE_DELAY}s for target host to wake before switching mouse"
-    sleep "$INTER_DEVICE_DELAY"
-  fi
-
-  send_receiver_slot "mouse" "$MOUSE_SLOT" "$host_index_decimal" || receiver_status=1
-
-  if [[ "$receiver_status" -eq 0 || "$LOGI_TRANSPORT" == "receiver" ]]; then
-    exit "$receiver_status"
-  fi
-
-  log "Receiver switch failed; falling back to Bluetooth direct devices"
-fi
-
-send_device "keyboard" "$KEYBOARD_VIDPID" "$KEYBOARD_PRODUCT" "$keyboard_payload" || result_status=1
-
-if [[ "$DRY_RUN" != "1" && "$INTER_DEVICE_DELAY" != "0" ]]; then
-  log "Waiting ${INTER_DEVICE_DELAY}s for target host to wake before switching mouse"
-  sleep "$INTER_DEVICE_DELAY"
-fi
-
-send_device "mouse" "$MOUSE_VIDPID" "$MOUSE_PRODUCT" "$mouse_payload" || result_status=1
-
-exit "$result_status"
+send_device "keyboard" "$KEYBOARD_VIDPID" "$KEYBOARD_PRODUCT" "$keyboard_payload" || exit 1
+wait_for_host
+send_device "mouse" "$MOUSE_VIDPID" "$MOUSE_PRODUCT" "$mouse_payload"
+exit $?

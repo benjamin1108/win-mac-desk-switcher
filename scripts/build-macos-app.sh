@@ -8,10 +8,6 @@ ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 APP_NAME="${APP_NAME:-切到Windows}"
 DIST_DIR="${DIST_DIR:-$ROOT_DIR/dist}"
 APP_PATH="${APP_PATH:-$DIST_DIR/$APP_NAME.app}"
-CONTENTS_DIR="$APP_PATH/Contents"
-MACOS_DIR="$CONTENTS_DIR/MacOS"
-RESOURCES_DIR="$CONTENTS_DIR/Resources"
-FRAMEWORKS_DIR="$CONTENTS_DIR/Frameworks"
 BUNDLE_ID="${BUNDLE_ID:-local.win-mac-desk-switcher.to-windows}"
 M1DDC_PATH="${M1DDC_PATH:-$(command -v m1ddc || true)}"
 ICON_PATH="${ICON_PATH:-$ROOT_DIR/assets/AppIcon.icns}"
@@ -93,6 +89,11 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
+CONTENTS_DIR="$APP_PATH/Contents"
+MACOS_DIR="$CONTENTS_DIR/MacOS"
+RESOURCES_DIR="$CONTENTS_DIR/Resources"
+FRAMEWORKS_DIR="$CONTENTS_DIR/Frameworks"
+
 require_file() {
   local file_path="$1"
   local label="$2"
@@ -169,7 +170,12 @@ export PATH="$ROOT_DIR/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/s
 export LOG_PATH="$LOG_DIR/switch-to-windows-now.log"
 
 cd "$ROOT_DIR" || exit 1
-exec "$ROOT_DIR/scripts/switch-to-windows-now.sh"
+"$ROOT_DIR/scripts/switch-to-windows-now.sh" "$@"
+result=$?
+if [[ "$result" -ne 0 && " $* " != *" --dry-run "* && "${DRY_RUN:-0}" != "1" ]]; then
+  /usr/bin/osascript -e 'display alert "切到 Windows 失败" message "请检查键鼠是否已连接，并确认输入监控权限。详情见 ~/Library/Logs/win-mac-desk-switcher/switch-to-windows-now.log。" as critical' || true
+fi
+exit "$result"
 EOF
 
 chmod 755 "$MACOS_DIR/launcher"
@@ -192,9 +198,9 @@ cat > "$CONTENTS_DIR/Info.plist" <<EOF
   <key>CFBundlePackageType</key>
   <string>APPL</string>
   <key>CFBundleVersion</key>
-  <string>1</string>
+  <string>2</string>
   <key>CFBundleShortVersionString</key>
-  <string>1.0</string>
+  <string>1.1</string>
   <key>LSUIElement</key>
   <true/>
   <key>NSHighResolutionCapable</key>

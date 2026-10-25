@@ -3,6 +3,8 @@
 #include <IOKit/hid/IOHIDKeys.h>
 #include <IOKit/hid/IOHIDManager.h>
 
+#include <errno.h>
+#include <limits.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -26,6 +28,8 @@ static void usage(const char *argv0) {
         "  --recv [MS]              Accepted for compatibility; ignored.\n"
         "  --receiver-change-host   Send Logitech receiver HID++ CHANGE_HOST.\n"
         "  --receiver-ping          Send a harmless Logitech receiver HID++ ping.\n"
+        "  --receiver-info          Read device name, CHANGE_HOST and HOSTS_INFO.\n"
+        "  --expect-name TEXT       Require this exact paired device name.\n"
         "  --device N               Receiver HID++ device/slot number.\n"
         "  --target-host-index N     Zero-based target host index.\n"
         "  --timeout-ms N           HID++ reply timeout. Default: 1500.\n",
@@ -38,8 +42,9 @@ static int parse_int(const char *text, unsigned int *value) {
     if (text[0] == '0' && (text[1] == 'x' || text[1] == 'X')) {
         base = 16;
     }
+    errno = 0;
     unsigned long parsed = strtoul(text, &end, base);
-    if (!text[0] || (end && *end)) {
+    if (!text[0] || text[0] == '-' || errno || parsed > UINT_MAX || (end && *end)) {
         return 0;
     }
     *value = (unsigned int)parsed;
@@ -58,10 +63,10 @@ static int parse_vidpid(const char *text, unsigned short *vid, unsigned short *p
     strcpy(right, colon + 1);
     char *end = NULL;
     unsigned long v = strtoul(left, &end, 16);
-    if (!left[0] || (end && *end)) return 0;
+    if (!left[0] || v > 0xffff || (end && *end)) return 0;
     end = NULL;
     unsigned long p = strtoul(right, &end, 16);
-    if (!right[0] || (end && *end)) return 0;
+    if (!right[0] || p > 0xffff || (end && *end)) return 0;
     *vid = (unsigned short)v;
     *pid = (unsigned short)p;
     return 1;
@@ -111,11 +116,8 @@ static IOHIDManagerRef create_manager(void) {
     IOHIDManagerRef manager = IOHIDManagerCreate(kCFAllocatorDefault, kIOHIDOptionsTypeNone);
     if (!manager) return NULL;
     IOHIDManagerSetDeviceMatching(manager, NULL);
-    IOReturn result = IOHIDManagerOpen(manager, kIOHIDOptionsTypeNone);
-    if (result != kIOReturnSuccess) {
-        CFRelease(manager);
-        return NULL;
-    }
+    // Enumerate without opening every keyboard on the system. Only open the
+    // selected HID++ interface after matching its VID/PID and usage below.
     return manager;
 }
 
@@ -126,8 +128,10 @@ static void print_device(IOHIDDeviceRef device) {
     long usage = get_int_property(device, CFSTR(kIOHIDPrimaryUsageKey));
     char product[512];
     copy_string_property(device, CFSTR(kIOHIDProductKey), product, sizeof(product));
-    printf("VID=%04lX PID=%04lX usagePage=0x%04lX usage=0x%04lX interface=-1 product=%s path=IOHIDDevice:%p\n",
-        vid, pid, usage_page, usage, product, device);
+    char transport[64];
+    copy_string_property(device, CFSTR(kIOHIDTransportKey), transport, sizeof(transport));
+    printf("VID=%04lX PID=%04lX usagePage=0x%04lX usage=0x%04lX transport=%s product=%s\n",
+        vid, pid, usage_page, usage, transport, product);
 }
 
 struct hid_reply_context {
@@ -144,12 +148,11 @@ static double now_ms(void) {
 
 static void input_report_callback(void *context, IOReturn result, void *sender, IOHIDReportType type,
                                   uint32_t report_id, uint8_t *report, CFIndex report_length) {
-    (void)result;
     (void)sender;
     (void)type;
     (void)report_id;
     struct hid_reply_context *ctx = (struct hid_reply_context *)context;
-    if (!ctx || report_length <= 0) return;
+    if (!ctx || result != kIOReturnSuccess || report_length <= 0) return;
     CFIndex copy_len = report_length;
     if (copy_len > (CFIndex)sizeof(ctx->report)) copy_len = (CFIndex)sizeof(ctx->report);
     memcpy(ctx->report, report, (size_t)copy_len);
@@ -168,6 +171,13 @@ static void print_hex(const unsigned char *bytes, size_t length) {
     print_hex_to(stdout, bytes, length);
 }
 
+static void stop_reports(IOHIDDeviceRef device) {
+    static unsigned char unused_buffer[256];
+    IOHIDDeviceUnscheduleFromRunLoop(device, CFRunLoopGetCurrent(), kCFRunLoopDefaultMode);
+    IOHIDDeviceRegisterInputReportCallback(device, unused_buffer, sizeof(unused_buffer), NULL, NULL);
+}
+
+// 1 = reply, 0 = report sent but reply timed out, -1 = write/protocol error.
 static int send_hidpp_request(IOHIDDeviceRef device, const unsigned char *output, size_t output_len,
                               int reply_dev, int feature_index, int function_id, int timeout_ms,
                               unsigned char *reply, size_t *reply_len) {
@@ -184,9 +194,9 @@ static int send_hidpp_request(IOHIDDeviceRef device, const unsigned char *output
 
     IOReturn send_result = IOHIDDeviceSetReport(device, kIOHIDReportTypeOutput, output[0], output, (CFIndex)output_len);
     if (send_result != kIOReturnSuccess) {
-        IOHIDDeviceUnscheduleFromRunLoop(device, CFRunLoopGetCurrent(), kCFRunLoopDefaultMode);
+        stop_reports(device);
         fprintf(stderr, "IOHIDDeviceSetReport failed: 0x%08X\n", send_result);
-        return 0;
+        return -1;
     }
 
     double deadline = now_ms() + (double)timeout_ms;
@@ -203,22 +213,22 @@ static int send_hidpp_request(IOHIDDeviceRef device, const unsigned char *output
             if (copy_len > reply_capacity) copy_len = reply_capacity;
             memcpy(reply, ctx.report, copy_len);
             *reply_len = copy_len;
-            IOHIDDeviceUnscheduleFromRunLoop(device, CFRunLoopGetCurrent(), kCFRunLoopDefaultMode);
+            stop_reports(device);
             return 1;
         }
-        if (ctx.report_len >= 6 && ctx.report[2] == 0x8F &&
+        if (ctx.report_len >= 6 && (ctx.report[2] == 0x8F || ctx.report[2] == 0xFF) &&
             ctx.report[3] == (unsigned char)(feature_index & 0xFF) &&
             ctx.report[4] == (unsigned char)((function_id & 0xF0) | 0x02)) {
             size_t copy_len = (size_t)ctx.report_len;
             if (copy_len > reply_capacity) copy_len = reply_capacity;
             memcpy(reply, ctx.report, copy_len);
             *reply_len = copy_len;
-            IOHIDDeviceUnscheduleFromRunLoop(device, CFRunLoopGetCurrent(), kCFRunLoopDefaultMode);
-            return 0;
+            stop_reports(device);
+            return -1;
         }
     }
 
-    IOHIDDeviceUnscheduleFromRunLoop(device, CFRunLoopGetCurrent(), kCFRunLoopDefaultMode);
+    stop_reports(device);
     return 0;
 }
 
@@ -246,7 +256,7 @@ static int lookup_feature_index(IOHIDDeviceRef device, int devnumber, int featur
     };
     unsigned char reply[256];
     size_t reply_len = sizeof(reply);
-    if (!hidpp_feature_request(device, devnumber, 0x00, 0x00, params, sizeof(params), timeout_ms, reply, &reply_len)) {
+    if (hidpp_feature_request(device, devnumber, 0x00, 0x00, params, sizeof(params), timeout_ms, reply, &reply_len) != 1) {
         fprintf(stderr, "Feature lookup 0x%04X failed or timed out for device %d", feature_id, devnumber);
         if (reply_len > 0) {
             fprintf(stderr, "; reply=");
@@ -259,6 +269,10 @@ static int lookup_feature_index(IOHIDDeviceRef device, int devnumber, int featur
         fprintf(stderr, "Feature lookup 0x%04X returned short reply\n", feature_id);
         return -1;
     }
+    if (reply[4] == 0) {
+        fprintf(stderr, "Device %d does not support feature 0x%04X\n", devnumber, feature_id);
+        return -1;
+    }
     return reply[4];
 }
 
@@ -269,7 +283,7 @@ static int receiver_ping(IOHIDDeviceRef device, int devnumber, int timeout_ms) {
     unsigned char output[7] = { 0x10, (unsigned char)devnumber, 0x00, 0x12, 0x00, 0x00, mark };
     int success = send_hidpp_request(device, output, sizeof(output), devnumber, 0x00, 0x10,
                                      timeout_ms, reply, &reply_len);
-    if (success && reply_len >= 7 && reply[6] == mark) {
+    if (success == 1 && reply_len >= 7 && reply[6] == mark) {
         printf("PING device=%d online HID++ %d.%d reply=", devnumber, reply[4], reply[5]);
         print_hex(reply, reply_len);
         printf("\n");
@@ -284,6 +298,60 @@ static int receiver_ping(IOHIDDeviceRef device, int devnumber, int timeout_ms) {
     return 1;
 }
 
+static int read_device_name(IOHIDDeviceRef device, int devnumber, int timeout_ms,
+                            char *name, size_t capacity) {
+    int feature = lookup_feature_index(device, devnumber, 0x0005, timeout_ms);
+    if (feature < 0) return 1;
+    unsigned char reply[256];
+    size_t length = sizeof(reply);
+    if (hidpp_feature_request(device, devnumber, feature, 0x00, NULL, 0,
+                              timeout_ms, reply, &length) != 1 || length < 5) return 1;
+    size_t name_length = reply[4];
+    if (name_length == 0 || name_length >= capacity) return 1;
+    for (size_t offset = 0; offset < name_length;) {
+        unsigned char start = (unsigned char)offset;
+        length = sizeof(reply);
+        if (hidpp_feature_request(device, devnumber, feature, 0x10, &start, 1,
+                                  timeout_ms, reply, &length) != 1 || length <= 4) return 1;
+        size_t chunk = length - 4;
+        if (chunk > name_length - offset) chunk = name_length - offset;
+        memcpy(name + offset, reply + 4, chunk);
+        offset += chunk;
+    }
+    name[name_length] = '\0';
+    return 0;
+}
+
+static int check_device_name(IOHIDDeviceRef device, int devnumber, int timeout_ms,
+                             const char *expected_name) {
+    char name[256];
+    if (read_device_name(device, devnumber, timeout_ms, name, sizeof(name))) {
+        fprintf(stderr, "Could not read paired device name for slot %d\n", devnumber);
+        return 1;
+    }
+    printf("DEVICE device=%d name=%s\n", devnumber, name);
+    if (expected_name && strcmp(name, expected_name) != 0) {
+        fprintf(stderr, "Device mismatch: slot %d is %s; expected %s\n", devnumber, name, expected_name);
+        return 1;
+    }
+    return 0;
+}
+
+static int receiver_info(IOHIDDeviceRef device, int devnumber, int timeout_ms,
+                         const char *expected_name) {
+    if (check_device_name(device, devnumber, timeout_ms, expected_name)) return 1;
+    int change_feature = lookup_feature_index(device, devnumber, 0x1814, timeout_ms);
+    int hosts_feature = lookup_feature_index(device, devnumber, 0x1815, timeout_ms);
+    if (change_feature < 0 || hosts_feature < 0) return 1;
+    unsigned char reply[256];
+    size_t length = sizeof(reply);
+    if (hidpp_feature_request(device, devnumber, hosts_feature, 0x00, NULL, 0,
+                              timeout_ms, reply, &length) != 1 || length < 8) return 1;
+    printf("INFO device=%d changeHostIndex=0x%02X hostsInfoIndex=0x%02X hostCount=%d currentHostIndex=%d physicalChannel=%d\n",
+           devnumber, change_feature, hosts_feature, reply[6], reply[7], reply[7] + 1);
+    return 0;
+}
+
 static int receiver_change_host(IOHIDDeviceRef device, int devnumber, int target_host_index, int timeout_ms) {
     int feature_index = lookup_feature_index(device, devnumber, 0x1814, timeout_ms);
     if (feature_index < 0) return 1;
@@ -293,7 +361,7 @@ static int receiver_change_host(IOHIDDeviceRef device, int devnumber, int target
     size_t reply_len = sizeof(reply);
     int success = hidpp_feature_request(device, devnumber, feature_index, 0x10, params, sizeof(params),
                                         timeout_ms, reply, &reply_len);
-    if (success) {
+    if (success == 1) {
         printf("Sent CHANGE_HOST device=%d featureIndex=0x%02X targetHostIndex=%d physicalChannel=%d reply=",
                devnumber, feature_index, target_host_index, target_host_index + 1);
         print_hex(reply, reply_len);
@@ -301,7 +369,13 @@ static int receiver_change_host(IOHIDDeviceRef device, int devnumber, int target
         return 0;
     }
 
-    printf("Sent CHANGE_HOST device=%d featureIndex=0x%02X targetHostIndex=%d physicalChannel=%d; no success reply",
+    if (success < 0) {
+        fprintf(stderr, "CHANGE_HOST failed for device=%d reply=", devnumber);
+        print_hex_to(stderr, reply, reply_len);
+        fprintf(stderr, "\n");
+        return 1;
+    }
+    printf("Sent CHANGE_HOST device=%d featureIndex=0x%02X targetHostIndex=%d physicalChannel=%d; reply timed out, physical switch unconfirmed",
            devnumber, feature_index, target_host_index, target_host_index + 1);
     if (reply_len > 0) {
         printf(" reply=");
@@ -324,6 +398,8 @@ int main(int argc, char **argv) {
     char *send_text = NULL;
     int receiver_change_host_mode = 0;
     int receiver_ping_mode = 0;
+    int receiver_info_mode = 0;
+    const char *expected_name = NULL;
     int receiver_device = -1;
     int target_host_index = -1;
     int timeout_ms = 1500;
@@ -369,8 +445,11 @@ int main(int argc, char **argv) {
             if (!product_filter) {
                 product_filter = "USB Receiver";
             }
-        } else if (strcmp(argv[i], "--receiver-ping") == 0) {
-            receiver_ping_mode = 1;
+        } else if (strcmp(argv[i], "--expect-name") == 0 && i + 1 < argc) {
+            expected_name = argv[++i];
+        } else if (strcmp(argv[i], "--receiver-ping") == 0 || strcmp(argv[i], "--receiver-info") == 0) {
+            if (strcmp(argv[i], "--receiver-info") == 0) receiver_info_mode = 1;
+            else receiver_ping_mode = 1;
             if (!have_vidpid) {
                 vid = 0x046D;
                 pid = 0xC548;
@@ -385,21 +464,21 @@ int main(int argc, char **argv) {
             }
         } else if (strcmp(argv[i], "--device") == 0 && i + 1 < argc) {
             unsigned int value = 0;
-            if (!parse_int(argv[++i], &value)) {
+            if (!parse_int(argv[++i], &value) || value < 1 || value > 6) {
                 fprintf(stderr, "Invalid --device\n");
                 return 2;
             }
             receiver_device = (int)value;
         } else if (strcmp(argv[i], "--target-host-index") == 0 && i + 1 < argc) {
             unsigned int value = 0;
-            if (!parse_int(argv[++i], &value)) {
+            if (!parse_int(argv[++i], &value) || value > 2) {
                 fprintf(stderr, "Invalid --target-host-index\n");
                 return 2;
             }
             target_host_index = (int)value;
         } else if (strcmp(argv[i], "--timeout-ms") == 0 && i + 1 < argc) {
             unsigned int value = 0;
-            if (!parse_int(argv[++i], &value)) {
+            if (!parse_int(argv[++i], &value) || value < 1 || value > 60000) {
                 fprintf(stderr, "Invalid --timeout-ms\n");
                 return 2;
             }
@@ -413,9 +492,20 @@ int main(int argc, char **argv) {
         }
     }
 
+    int receiver_mode = receiver_change_host_mode || receiver_ping_mode || receiver_info_mode;
+    if (list + receiver_change_host_mode + receiver_ping_mode + receiver_info_mode + (send_text != NULL) != 1 ||
+        (receiver_mode && receiver_device < 1) ||
+        (receiver_change_host_mode && target_host_index < 0)) {
+        usage(argv[0]);
+        return 2;
+    }
+    if (receiver_mode && !have_usage) {
+        usage_id = 0x0001;
+        have_usage = 1;
+    }
     IOHIDManagerRef manager = create_manager();
     if (!manager) {
-        fprintf(stderr, "IOHIDManagerOpen failed\n");
+        fprintf(stderr, "IOHIDManagerCreate failed\n");
         return 1;
     }
 
@@ -445,7 +535,7 @@ int main(int argc, char **argv) {
         return 0;
     }
 
-    if (receiver_change_host_mode || receiver_ping_mode) {
+    if (receiver_mode) {
         if (receiver_device < 0 || (receiver_change_host_mode && (target_host_index < 0 || target_host_index > 2))) {
             usage(argv[0]);
             free(device_list);
@@ -463,7 +553,7 @@ int main(int argc, char **argv) {
 
     unsigned char bytes[256];
     size_t byte_count = 0;
-    if (!receiver_change_host_mode && !receiver_ping_mode) {
+    if (!receiver_mode) {
         byte_count = sizeof(bytes);
         char *send_copy = strdup(send_text);
         if (!send_copy || !parse_bytes(send_copy, bytes, &byte_count)) {
@@ -489,17 +579,6 @@ int main(int argc, char **argv) {
         break;
     }
 
-    if (!match && (have_usage_page || have_usage)) {
-        for (CFIndex i = 0; i < count; i++) {
-            IOHIDDeviceRef device = device_list[i];
-            if ((unsigned short)get_int_property(device, CFSTR(kIOHIDVendorIDKey)) != vid) continue;
-            if ((unsigned short)get_int_property(device, CFSTR(kIOHIDProductIDKey)) != pid) continue;
-            if (!product_matches(device, product_filter)) continue;
-            match = device;
-            break;
-        }
-    }
-
     if (!match) {
         fprintf(stderr, "No matching HID device found\n");
         free(device_list);
@@ -518,6 +597,19 @@ int main(int argc, char **argv) {
         CFRelease(devices);
         CFRelease(manager);
         return 1;
+    }
+
+    if (receiver_info_mode || (receiver_change_host_mode && expected_name)) {
+        int result = receiver_info_mode
+            ? receiver_info(match, receiver_device, timeout_ms, expected_name)
+            : check_device_name(match, receiver_device, timeout_ms, expected_name);
+        if (receiver_info_mode || result != 0) {
+            IOHIDDeviceClose(match, kIOHIDOptionsTypeNone);
+            free(device_list);
+            CFRelease(devices);
+            CFRelease(manager);
+            return result;
+        }
     }
 
     if (receiver_ping_mode) {

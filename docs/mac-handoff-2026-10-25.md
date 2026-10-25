@@ -66,3 +66,47 @@
 7. 完成后运行 `zsh scripts/build-macos-app.sh` 重新生成 `dist/切到Windows.app`，保留现有图标。构建需要本机 `m1ddc`；沿用正常无 setuid 构建。将 App 放入 `/Applications`，按需要重新授予输入监控权限并放入 Dock。不要只修改仓库脚本却继续运行旧 App，App 内有脚本副本。
 
 8. 将 Mac 实测的配对 slot 或蓝牙参数、权限设置、真实切换结果补充到本文并提交源码。Windows 的 slot 3、5 不应被 Mac 端 slot 覆盖。
+
+
+## Mac 端实测与适配结果（2026-10-25）
+
+已从 `f2d3880` 快进到 `5b2ab53` 后完成以下适配。Windows 的 slot 3、5 保持不变。
+
+| 项目 | Mac 只读实测 |
+| --- | --- |
+| 连接方式 | USB Bolt 接收器，046D:C548，产品名 USB Receiver |
+| HID++ 接口 | UsagePage 0xFF00，Usage 0x0001；无 Usage 0x0002 接口 |
+| 键盘 | slot 2，查询名称 Alto Keys K98M，HID++ 4.5 |
+| 键盘功能 | CHANGE_HOST 0x0A；HOSTS_INFO 0x0B |
+| 新鼠标 | slot 3，查询名称 MX Master 4，HID++ 4.5 |
+| 鼠标功能 | CHANGE_HOST 0x0E；HOSTS_INFO 0x0F |
+| 当前信道 | 两台均报告 3 个主机、hostIndex 1，即物理 2 号信道 |
+| Windows 目标 | 继续使用物理 1 号信道，即 hostIndex 0 |
+| 显示器 | m1ddc 显示器 1 为 LG ULTRAGEAR+；保留 input-alt 208 / DP1，未执行切屏验证 |
+| 蓝牙 | 未发现直连的新鼠标；未推测其 VID/PID，移除旧 3S 默认值 |
+
+### 已完成的代码与构建
+
+- Mac 默认使用 receiver，slot 改为键盘 2 / 鼠标 3，帮助说明同步更新。
+- 新增 `--receiver-info` 读取设备名称、CHANGE_HOST 和 HOSTS_INFO；新增脚本 `--check` 只读核验两台设备。
+- 切换前验证两台名称，发送前再次核对该 slot 的名称；鼠标必须为 MX Master 4。
+- IOKit 枚举不再先打开全部系统 HID，只打开严格匹配的接口；指定 Usage 不存在时直接失败，不再选择其它接口。设备列表不输出序列号、指针或机器路径。
+- 功能索引 0 视为不支持；区分 HID 写入/协议错误和发送后超时。后者保留设备切走时无回复的兼容行为，并明确标注物理切换未确认。
+- 键鼠明确失败时返回错误，默认不继续切屏；不会在部分设备已切换后回退到蓝牙。
+- 完整 `--dry-run` 展示两台设备的实际参数；App 启动器转发参数，并在真实执行失败时显示提示。
+- 修复打包脚本自定义输出目录未同步到 bundle 子目录的问题；保留原图标，版本 1.1 / build 2，正常非 setuid 构建。
+
+### 验证和权限
+
+- `cc -Wall -Wextra -Werror` 编译通过；三个 zsh 脚本语法检查通过。
+- 10 项脚本回归测试通过；原生协议模拟测试通过，测试均不操作真实硬件。
+- 实机 `--check` 成功读取两台名称和功能编号；只读 probe 确认 slot 2、3 在线。
+- 沙箱内设备打开被系统拒绝，允许本地硬件访问后查询成功；未修改系统隐私数据库或增加 setuid 权限。重装 App 后是否需要重新开启“输入监控”，以 App 实际运行和系统提示为准。
+- App ad-hoc 签名、Info.plist、系统库依赖检查通过，图标与原始资源 SHA-256 一致。
+- **未执行真实切换**。还需在用户准备好切回 Windows 时验收键盘、MX Master 4、LG 显示器三个结果；演练和查询不等于真实切换成功。
+
+名称查询遵循 DEVICE_NAME (0x0005) 的长度与分片读取方式，可参照 [Solaar 的 HID++ 实现](https://github.com/pwr-Solaar/Solaar/blob/master/lib/logitech_receiver/hidpp20.py)。
+
+### 本机安装
+
+已将新版安装到 `/Applications/切到Windows.app`，仓库 `dist/切到Windows.app` 同步更新。安装后的 App 启动器 `--dry-run` 返回 0，App 内置 HID 工具的 `--check` 成功识别键盘和 MX Master 4。旧 App 已保存在本次工作目录 `work/backups/`，便于回退。仓库已有的旧 `bin/hid-send` 未改动，新脚本优先使用重新编译的 `bin/hid-send-macos`。
