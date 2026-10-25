@@ -1,4 +1,4 @@
-param(
+﻿param(
     [string]$OutputPath = (
         Join-Path (Split-Path -Parent $PSScriptRoot) ([string]([char[]](0x5207,0x5230,0x004D,0x0061,0x0063,0x002E,0x0065,0x0078,0x0065)))
     ),
