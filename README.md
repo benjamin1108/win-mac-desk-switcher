@@ -22,7 +22,7 @@ Mac 端接力适配请先阅读 [设备信息与操作步骤](docs/mac-handoff-2
 
 Mac 端也已完成只读实测和适配：通过 Bolt `046D:C548` 连接，HID++ 接口为 UsagePage `0xFF00` / Usage `0x0001`；键盘 Alto Keys K98M 在 **slot 2**，MX Master 4 在 **slot 3**，当前均为物理 2 号信道。键盘 CHANGE_HOST / HOSTS_INFO 为 `0x0A` / `0x0B`，鼠标为 `0x0E` / `0x0F`，每次运行动态查询。Mac 和 Windows 的配对表不同，不可互相覆盖。
 
-Mac 默认只使用已验证的 Bolt 配置，先读取两台设备名称并校验，再切到物理 1 号信道。设备不符、查询失败或明确的 HID 写入/协议错误会停止后续切换；默认顺序下不继续切屏。CHANGE_HOST 成功写入后可能因设备离开 Mac 而收不到回复，此时会注明实际切换待确认。已完成演练、协议/脚本回归测试和 App 构建；真实键盘、鼠标、显示器切换仍待用户准备好后验收。
+Mac 默认只使用已验证的 Bolt 配置，先读取两台设备名称并校验，再切到物理 1 号信道。设备不符、查询失败或明确的 HID 写入/协议错误会停止后续切换；默认顺序下不继续切屏。CHANGE_HOST 成功写入后可能因设备离开 Mac 而收不到回复，此时会注明实际切换待确认。已完成演练、协议/脚本回归测试和 App 构建；用户已确认键盘、MX Master 4、主显示器三项均正常切到 Windows。首次联调暴露 HID 回调内存生命周期问题，导致单键流程在键盘切走后中止；补执行鼠标与显示器后完成验收。已修复该崩溃并重装 1.1.1 版，AddressSanitizer 回归通过；最终修正版尚未再次完整实机切换。
 
 ## 目录结构
 
@@ -276,9 +276,9 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\switch-to-mac-
 
 ```zsh
 python3 tests/test_macos_switch.py
-cc tests/hid-send-macos-tests.c -Wall -Wextra -Werror \
+cc tests/hid-send-macos-tests.c -Wall -Wextra -Werror -fsanitize=address -g \
   -framework IOKit -framework CoreFoundation -o /tmp/hid-send-macos-tests
-/tmp/hid-send-macos-tests
+ASAN_OPTIONS=detect_stack_use_after_return=1 /tmp/hid-send-macos-tests
 ```
 
 脚本测试替换 HID/DDC 工具，覆盖演练无发送、名称预检失败、键鼠切换失败时停止切屏、空格路径和旧蓝牙配置禁用。原生协议测试使用模拟 IOKit，覆盖功能索引 0、设备名不符、写入失败、HID++ 1/2 错误和切换后的无回复。

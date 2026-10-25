@@ -7,6 +7,9 @@
 
 static IOHIDReportCallback callback;
 static void *callback_context;
+static uint8_t *queued_buffer;
+static IOHIDReportCallback queued_callback;
+static void *queued_context;
 static unsigned char pending[20];
 static int scenario, writes, changes;
 
@@ -14,7 +17,8 @@ enum { NORMAL, UNSUPPORTED, WRITE_ERROR, HIDPP1_ERROR, HIDPP2_ERROR, TIMEOUT };
 
 static void fake_register(IOHIDDeviceRef d, uint8_t *b, CFIndex n,
                           IOHIDReportCallback cb, void *ctx) {
-    (void)d; (void)b; (void)n;
+    (void)d; (void)n;
+    if (cb) { queued_buffer = b; queued_callback = cb; queued_context = ctx; }
     callback = cb;
     callback_context = ctx;
 }
@@ -77,14 +81,19 @@ int main(void) {
     for (int mode = WRITE_ERROR; mode <= HIDPP2_ERROR; mode++) {
         reset(mode);
         assert(receiver_change_host(NULL, 3, 0, 5) != 0);
-        assert(changes == 1 && callback == NULL);
+        assert(changes == 1);
     }
     reset(NORMAL);
     assert(receiver_change_host(NULL, 3, 0, 5) == 0);
-    assert(changes == 1 && callback == NULL);
+    assert(changes == 1);
     reset(TIMEOUT);
     assert(receiver_change_host(NULL, 3, 0, 1) == 0);
-    assert(changes == 1 && callback == NULL);
+    assert(changes == 1);
+    // Emulate a queued report delivered after the request frame has returned.
+    // ASan detects stack-use-after-return if callback storage is request-local.
+    memcpy(queued_buffer, pending, sizeof(pending));
+    queued_callback(queued_context, kIOReturnSuccess, NULL, kIOHIDReportTypeInput,
+             pending[0], queued_buffer, sizeof(pending));
     unsigned int value;
     assert(!parse_int("-1", &value));
     assert(!parse_int("4294967296", &value));

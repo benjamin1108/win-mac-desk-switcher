@@ -172,17 +172,18 @@ static void print_hex(const unsigned char *bytes, size_t length) {
 }
 
 static void stop_reports(IOHIDDeviceRef device) {
-    static unsigned char unused_buffer[256];
     IOHIDDeviceUnscheduleFromRunLoop(device, CFRunLoopGetCurrent(), kCFRunLoopDefaultMode);
-    IOHIDDeviceRegisterInputReportCallback(device, unused_buffer, sizeof(unused_buffer), NULL, NULL);
 }
 
 // 1 = reply, 0 = report sent but reply timed out, -1 = write/protocol error.
 static int send_hidpp_request(IOHIDDeviceRef device, const unsigned char *output, size_t output_len,
                               int reply_dev, int feature_index, int function_id, int timeout_ms,
                               unsigned char *reply, size_t *reply_len) {
-    struct hid_reply_context ctx;
-    unsigned char input_buffer[256];
+    // IOKit can deliver queued reports after a request has been unscheduled.
+    // This CLI uses one device on one thread; keep its callback storage alive
+    // until process exit, including when CHANGE_HOST disconnects a device.
+    static struct hid_reply_context ctx;
+    static unsigned char input_buffer[256];
     size_t reply_capacity = *reply_len;
     memset(&ctx, 0, sizeof(ctx));
     memset(input_buffer, 0, sizeof(input_buffer));
