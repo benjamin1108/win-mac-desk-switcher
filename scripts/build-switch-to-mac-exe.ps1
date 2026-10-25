@@ -36,8 +36,9 @@ using System.Windows.Forms;
 internal static class Program
 {
     [STAThread]
-    private static void Main()
+    private static void Main(string[] args)
     {
+        bool dryRun = args.Length == 1 && args[0] == "--dry-run";
         var baseDir = AppDomain.CurrentDomain.BaseDirectory;
         var scriptPath = Path.Combine(baseDir, "scripts", "switch-to-mac-now.ps1");
 
@@ -55,7 +56,7 @@ internal static class Program
         var psi = new ProcessStartInfo
         {
             FileName = "powershell.exe",
-            Arguments = "-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File \"" + scriptPath + "\"",
+            Arguments = "-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File \"" + scriptPath + "\"" + (dryRun ? " -DryRun" : ""),
             WorkingDirectory = baseDir,
             UseShellExecute = false,
             CreateNoWindow = true,
@@ -70,6 +71,13 @@ internal static class Program
                 {
                     throw new InvalidOperationException("powershell.exe did not start.");
                 }
+                process.WaitForExit();
+                if (process.ExitCode != 0 && !dryRun)
+                {
+                    MessageBox.Show("Switch failed. See logs\\switch-to-mac-now.log for details.",
+                        "SwitchToMac", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                }
+                Environment.ExitCode = process.ExitCode;
             }
         }
         catch (Exception ex)

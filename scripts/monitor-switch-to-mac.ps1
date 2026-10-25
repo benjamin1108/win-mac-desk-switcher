@@ -3,7 +3,9 @@
     [string]$DetectionMode = 'Hidpp',
     [string]$KeyboardPattern = 'HID\VID_046D&PID_C548&MI_00',
     [string]$MousePattern = 'HID\VID_046D&PID_C548&MI_01&Col01',
-    [int[]]$HidppDevices = @(3, 4),
+    [ValidateNotNullOrEmpty()]
+    [ValidateRange(1, 6)]
+    [int[]]$HidppDevices = @(3, 5),
     [string]$HidppPath = '',
     [int]$HidppTimeoutMs = 1500,
     [int]$PollSeconds = 1,
@@ -172,6 +174,7 @@ $lastStatus = $null
 $lastOnlineAt = @{}
 $slotOnlineState = @{}
 $cooldownLogged = $false
+$monitorArmed = $false
 
 foreach ($device in $HidppDevices) {
     $lastOnlineAt[[int]$device] = Get-Date
@@ -239,6 +242,21 @@ while ($true) {
         if ($status -ne $lastStatus) {
             Write-Log "状态: $summary" '状态'
             $lastStatus = $status
+        }
+
+        # Only arm after observing every configured device online together.
+        # A sleeping, unpaired, or incorrectly configured slot must not switch the display at startup.
+        if (-not $monitorArmed) {
+            $allPresent = if ($DetectionMode -eq 'Hidpp') {
+                @($presence | Where-Object { -not $_.Online }).Count -eq 0
+            } else {
+                $keyboardPresent -and $mousePresent
+            }
+            if ($allPresent) {
+                $monitorArmed = $true
+                Write-Log 'All configured devices are online; automatic switching is armed.'
+            }
+            $bothMissing = $false
         }
 
         if ($bothMissing) {

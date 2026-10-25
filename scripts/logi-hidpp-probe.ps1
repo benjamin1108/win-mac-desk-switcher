@@ -337,7 +337,7 @@ public static class LogiHidppProbe
     public static string HostsInfo(string path, int devnumber, int timeoutMs)
     {
         int featureIndex = LookupFeatureIndex(path, devnumber, 0x1815, timeoutMs);
-        if (featureIndex < 0) return "不支持 HOSTS_INFO 或没有回复";
+        if (featureIndex <= 0) return "不支持 HOSTS_INFO 或没有回复";
 
         RequestResult result = FeatureRequest(path, devnumber, featureIndex, 0x00, new byte[0], timeoutMs);
         if (!result.Success) return result.ToString();
@@ -350,7 +350,7 @@ public static class LogiHidppProbe
     public static string ChangeHost(string path, int devnumber, int targetHostIndex, int timeoutMs)
     {
         int featureIndex = LookupFeatureIndex(path, devnumber, 0x1814, timeoutMs);
-        if (featureIndex < 0) return "不支持 CHANGE_HOST 或没有回复";
+        if (featureIndex <= 0) return "不支持 CHANGE_HOST 或没有回复";
 
         RequestResult result = FeatureRequest(path, devnumber, featureIndex, 0x10, new byte[] { (byte)targetHostIndex }, timeoutMs);
         if (result.Success)

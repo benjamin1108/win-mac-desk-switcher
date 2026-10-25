@@ -1,5 +1,8 @@
 ﻿param(
-    [int[]]$HidppDevices = @(3, 4),
+    [ValidateNotNullOrEmpty()]
+    [ValidateRange(1, 6)]
+    [int[]]$HidppDevices = @(3, 5),
+    [ValidateRange(1, 3)]
     [int]$TargetChannel = 2,
     [string]$HidppPath = '',
     [int]$HidppTimeoutMs = 1500,

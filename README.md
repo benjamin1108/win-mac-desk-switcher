@@ -12,6 +12,16 @@ Windows 切到 Mac 时会执行：
 1. 把 Logitech 鼠标和键盘切到 Easy-Switch 2 号信道。
 2. 把显示器输入切到 Mac 的 Type-C 口。
 
+Mac 端接力适配请先阅读 [设备信息与操作步骤](docs/mac-handoff-2026-10-25.md)。
+
+## 本机适配（2026-10-25）
+
+已通过 Windows 接收器查询和演练验证：键盘使用 slot 3，新鼠标 MX Master 4 使用 slot 5；旧鼠标 MX Master 3S 仍在 slot 4，本配置不再切换它。两台当前设备均位于物理 1 号信道，切到 Mac 时沿用物理 2 号信道。MX Master 4 的 CHANGE_HOST feature index 实测为 0x0E，由脚本动态查询，无须固定写入。
+
+显示器识别为 LG ULTRAGEAR+，保留原有 Type-C 切换参数。自动监控启动后先等待全部配置设备同时在线，避免设备休眠或编号错误导致启动时误切屏。未启用登录自启动，也未执行真实切屏。
+
+本次验证范围是当前 Windows 电脑。下文 Mac 端配置仍是原项目的配置（包括旧鼠标蓝牙参数），需要在 Mac 上读取新鼠标的连接信息后再适配，不能直接套用 Windows 接收器的 slot 编号。
+
 ## 目录结构
 
 ```text
@@ -44,7 +54,7 @@ win-mac-desk-switcher
 
 它会按这个顺序执行：
 
-1. 把 Logitech slot `3`、`4` 切到物理 2 号信道。
+1. 把 Logitech slot `3`、`5` 切到物理 2 号信道。
 2. 运行 `bin\writeValueToDisplay.exe 0 0xD1 0xF4 0x50`。
 3. 把显示器切到 Mac Type-C 输入。
 
@@ -185,7 +195,7 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\switch-to-mac-
 
 自动监控逻辑：
 
-1. 监控 Logitech Bolt 接收器上的 HID++ slot `3` 和 `4`。
+1. 监控 Logitech Bolt 接收器上的 HID++ slot `3` 和 `5`。
 2. 当两个 slot 都离线超过 2 秒，认为鼠标和键盘都已经切走。
 3. 自动运行显示器切换命令，把显示器切到 Mac Type-C。
 
@@ -220,7 +230,7 @@ USB VID_046D PID_C548
 当前监控和切换的 HID++ slot：
 
 ```text
-3, 4
+3, 5
 ```
 
 HID++ 使用从 0 开始的 host index，Logitech 按键上的物理信道是从 1 开始的。所以：
@@ -242,13 +252,13 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\logi-hidpp-pro
 查看 slot 是否在线：
 
 ```powershell
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\logi-hidpp-probe.ps1 -Ping -Devices @(3, 4)
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\logi-hidpp-probe.ps1 -Ping -Devices @(3, 5)
 ```
 
 查看当前物理信道：
 
 ```powershell
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\logi-hidpp-probe.ps1 -HostsInfo -Devices @(3, 4)
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\logi-hidpp-probe.ps1 -HostsInfo -Devices @(3, 5)
 ```
 
 手动切到别的 Logitech 信道，例如 3 号信道：
